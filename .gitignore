@@ -10,3 +10,7 @@ build/
 # Claude Code local context (not shared in repo)
 CLAUDE.md
 .claude/
+
+# Local project tracking
+STATUS.md
+scratchpad.md
