@@ -98,6 +98,18 @@ _UI_MESSAGE_LIST_PATH = (
     '                                tell table 1\n'
 )
 
+_UI_MESSAGE_LIST_PATH_16_111 = (
+    'tell application "System Events"\n'
+    '    tell process "Microsoft Outlook"\n'
+    '        tell window 1\n'
+    '            tell UI element 2\n'
+    '                tell UI element 7\n'
+    '                    tell UI element 3\n'
+    '                        tell UI element 1\n'
+    '                            tell UI element 1\n'
+    '                                tell UI element 2\n'
+)
+
 _UI_MESSAGE_LIST_END = (
     '                                end tell\n'
     '                            end tell\n'
@@ -117,8 +129,7 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
     This is the fallback for New Outlook for Mac where AppleScript's inbox
     keyword only sees the empty local mailbox.
     """
-    script = (
-        _UI_MESSAGE_LIST_PATH +
+    script_body = (
         f'                                    set rowList to rows\n'
         f'                                    set rowCount to count of rowList\n'
         f'                                    set maxRows to rowCount\n'
@@ -135,7 +146,18 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         _UI_MESSAGE_LIST_END
     )
 
-    raw = await bridge_obj.run(script)
+    raw = ""
+    last_error = None
+    for path in (_UI_MESSAGE_LIST_PATH, _UI_MESSAGE_LIST_PATH_16_111):
+        try:
+            raw = await bridge_obj.run(path + script_body)
+        except Exception as error:
+            last_error = error
+            continue
+        if raw:
+            break
+    if not raw and last_error:
+        raise last_error
     if not raw:
         return []
 
