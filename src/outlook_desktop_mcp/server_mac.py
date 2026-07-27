@@ -153,6 +153,69 @@ async def _inbox_window_index(bridge_obj) -> int:
         return 1
 
 
+# A list timestamp is short and shaped like a clock time, a numeric date, or
+# a relative/weekday word: "8:17 AM", "14:30", "7/27/26", "Yesterday", "Wed".
+_TIME_TOKEN = (
+    r'\d{1,2}:\d{2}(?:\s*[AP]M)?'
+    r'|\d{1,2}[/.]\d{1,2}[/.]\d{2,4}'
+    r'|\b(?:Yesterday|Today|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b'
+)
+_TIME_LEADING = re.compile(rf'^\s*(?:{_TIME_TOKEN})', re.IGNORECASE)
+_TIME_TRAILING = re.compile(rf'(?:{_TIME_TOKEN})\s*$', re.IGNORECASE)
+# Importance prefixes seen on flagged rows (English; best-effort).
+_IMPORTANCE_PREFIXES = ("High priority", "Low priority")
+# A single leading "N <words>," clause: thread counts ("1 unread message,",
+# "4 messages,"). Locale-agnostic — matches digits + words, not the word
+# "messages" specifically. Applied repeatedly to strip a run of them.
+_COUNT_CLAUSE = re.compile(r"^\d+\s+[\w\s]+?,\s*")
+
+
+def _looks_like_time(value: str) -> bool:
+    value = (value or "").strip()
+    return len(value) <= 24 and bool(_TIME_LEADING.match(value))
+
+
+def _strip_row_prefixes(text: str) -> str:
+    """Strip leading importance and thread-count clauses that a conversation
+    row prepends before the sender ("High priority, 1 unread message,
+    4 messages, <sender>, <subject>"). No-op on ordinary rows.
+    """
+    for imp in _IMPORTANCE_PREFIXES:
+        if text.startswith(imp):
+            text = text[len(imp):].lstrip(", ")
+            break
+    prev = None
+    while prev != text:
+        prev = text
+        text = _COUNT_CLAUSE.sub("", text, count=1)
+    return text.strip()
+
+
+def _salvage_thread_row(record: str) -> tuple[str, str, str]:
+    """Best-effort parse of a collapsed conversation / meeting row whose fields
+    don't follow the standard "Sender, Subject,    Time,    Preview" layout.
+
+    Returns (sender, subject, time); time is "" when nothing time-like can be
+    recovered, in which case the caller keeps its original parse rather than
+    dropping the row.
+    """
+    # The body preview is the first field after a comma + 4 spaces; drop it.
+    pre = re.split(r",\s{4,}", record, maxsplit=1)[0].strip()
+    # The list timestamp is the trailing time-like token.
+    m = _TIME_TRAILING.search(pre)
+    if not m:
+        return "", "", ""
+    time_str = m.group(0).strip()
+    pre = pre[:m.start()].rstrip()
+    # Drop meeting metadata ("Meeting message, <date>, <time> (dur) Conflicts").
+    pre = re.split(r",?\s*Meeting message\b", pre, maxsplit=1)[0]
+    pre = _strip_row_prefixes(pre)
+    parts = [p.strip() for p in pre.split(", ") if p.strip()]
+    sender = parts[0] if parts else ""
+    subject = ", ".join(parts[1:]) if len(parts) > 1 else ""
+    return sender, subject, time_str
+
+
 async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
     """Read visible inbox messages via UI scripting (System Events).
 
@@ -249,11 +312,9 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         if not time_str:
             continue
 
-        # Split sender from subject on first ", " (comma + single space)
-        # Remove thread/unread count prefixes like "2 messages, " or
-        # "1 unread message, " in any locale (pattern: digits + words + comma)
-        ss = sender_subject
-        ss = re.sub(r"^\d+\s+[\w\s]+,\s*", "", ss)
+        # Split sender from subject on first ", " (comma + single space),
+        # after dropping any importance / thread-count prefixes.
+        ss = _strip_row_prefixes(sender_subject)
         # Split on first ", " to get sender and subject
         comma_pos = ss.find(", ")
         if comma_pos > 0:
@@ -262,6 +323,15 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         else:
             sender = ""
             subject = ss.strip()
+
+        # Collapsed conversation / meeting rows put the time behind extra
+        # fields, so the standard split lands preview text in `time_str`.
+        # Re-parse those; only override when a real time is recovered, so a
+        # row we can't salvage keeps its best-effort parse instead of vanishing.
+        if not _looks_like_time(time_str):
+            s_sender, s_subject, s_time = _salvage_thread_row(record)
+            if s_time:
+                sender, subject, time_str = s_sender, s_subject, s_time
 
         results.append({
             "entry_id": f"ui-{idx}",
