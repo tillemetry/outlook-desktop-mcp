@@ -160,11 +160,15 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
     keyword only sees the empty local mailbox.
     """
     win = await _inbox_window_index(bridge_obj)
+    # Over-fetch: day-group headers ("Today"), the "Other" bucket, and the
+    # "cell" placeholder are interleaved as rows and get dropped below, so
+    # read a buffer of extra rows to still return up to `count` real messages.
+    fetch = count + 10
     script_body = (
         f'                                    set rowList to rows\n'
         f'                                    set rowCount to count of rowList\n'
         f'                                    set maxRows to rowCount\n'
-        f'                                    if maxRows > {count} then set maxRows to {count}\n'
+        f'                                    if maxRows > {fetch} then set maxRows to {fetch}\n'
         f'                                    set output to ""\n'
         f'                                    repeat with i from 1 to maxRows\n'
         f'                                        set r to row i\n'
@@ -238,6 +242,13 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         # Strip trailing comma from time
         time_str = time_str.rstrip(",").strip()
 
+        # Skip non-message rows. Day-group headers ("Today, Expanded"),
+        # the collapsed "Other" bucket, and container placeholders ("cell")
+        # have no time/date field, while every real message row does — so an
+        # empty time is a reliable, locale-proof marker of a non-message row.
+        if not time_str:
+            continue
+
         # Split sender from subject on first ", " (comma + single space)
         # Remove thread/unread count prefixes like "2 messages, " or
         # "1 unread message, " in any locale (pattern: digits + words + comma)
@@ -264,7 +275,7 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
             "_source": "ui_scraping",
         })
 
-    return results
+    return results[:count]
 
 
 # =====================================================================
