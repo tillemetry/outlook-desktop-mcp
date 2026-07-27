@@ -89,7 +89,7 @@ def _clean(value: str) -> str:
 _UI_MESSAGE_LIST_PATH = (
     'tell application "System Events"\n'
     '    tell process "Microsoft Outlook"\n'
-    '        tell window 1\n'
+    '        tell window {win}\n'
     '            tell splitter group 1\n'
     '                tell splitter group 1\n'
     '                    tell splitter group 1\n'
@@ -101,7 +101,7 @@ _UI_MESSAGE_LIST_PATH = (
 _UI_MESSAGE_LIST_PATH_16_111 = (
     'tell application "System Events"\n'
     '    tell process "Microsoft Outlook"\n'
-    '        tell window 1\n'
+    '        tell window {win}\n'
     '            tell UI element 2\n'
     '                tell UI element 7\n'
     '                    tell UI element 3\n'
@@ -123,12 +123,43 @@ _UI_MESSAGE_LIST_END = (
 )
 
 
+async def _inbox_window_index(bridge_obj) -> int:
+    """1-based index of the front-most window whose title is the Inbox.
+
+    The scrape reads a fixed UI path under `window {n}`. New Outlook makes a
+    compose/reply or an opened message its own window, and that can be
+    `window 1` at read time — which is why an otherwise-working mailbox
+    scrapes empty. Target the Inbox window by title instead. Falls back to 1
+    (prior behavior) if no window matches, e.g. a non-English title.
+    """
+    script = (
+        'tell application "System Events"\n'
+        '    tell process "Microsoft Outlook"\n'
+        '        set idx to 1\n'
+        '        set ws to windows\n'
+        '        repeat with i from 1 to count of ws\n'
+        '            if name of (item i of ws) starts with "Inbox" then\n'
+        '                set idx to i\n'
+        '                exit repeat\n'
+        '            end if\n'
+        '        end repeat\n'
+        '        return idx\n'
+        '    end tell\n'
+        'end tell'
+    )
+    try:
+        return int(str(await bridge_obj.run(script)).strip())
+    except Exception:
+        return 1
+
+
 async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
     """Read visible inbox messages via UI scripting (System Events).
 
     This is the fallback for New Outlook for Mac where AppleScript's inbox
     keyword only sees the empty local mailbox.
     """
+    win = await _inbox_window_index(bridge_obj)
     script_body = (
         f'                                    set rowList to rows\n'
         f'                                    set rowCount to count of rowList\n'
@@ -148,7 +179,8 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
 
     raw = ""
     last_error = None
-    for path in (_UI_MESSAGE_LIST_PATH, _UI_MESSAGE_LIST_PATH_16_111):
+    for path in (_UI_MESSAGE_LIST_PATH.format(win=win),
+                 _UI_MESSAGE_LIST_PATH_16_111.format(win=win)):
         try:
             raw = await bridge_obj.run(path + script_body)
         except Exception as error:
